@@ -1,0 +1,260 @@
+import os
+from datetime import datetime
+from flask import Flask, request, render_template, flash, redirect, url_for
+from werkzeug.utils import secure_filename
+import tensorflow as tf
+from PIL import Image
+import numpy as np
+import sqlite3
+from pathlib import Path
+
+app = Flask(_name_)
+app.secret_key = 'your-secret-key-here'  # Required for flash messages
+
+# Configure upload folder and allowed extensions
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
+DB_PATH = 'predictions.db'
+
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5MB max file size
+
+# Initialize database
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS predictions
+        (id INTEGER PRIMARY KEY AUTOINCREMENT,
+         filename TEXT NOT NULL,
+         result TEXT NOT NULL,
+         confidence REAL NOT NULL,
+         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)
+    ''')
+    conn.commit()
+    conn.close()
+
+# Load the model at startup
+try:
+    model = tf.keras.models.load_model('final.h5')
+except Exception as e:
+    print(f"Error loading model: {e}")
+    model = None
+
+# Class mapping dictionary
+CLASS_MAPPING = {
+    0: "implant accepted",
+    1: "implant rejected",
+    2: "implant disinfected",
+    3: "implant infected"
+}
+
+def allowed_file(filename):
+    """Check if the uploaded file has an allowed extension"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def preprocess_image(image_path):
+    """Preprocess the uploaded image for model prediction"""
+    try:
+        img = Image.open(image_path).convert('RGB')
+        img = img.resize((128, 128))  # Adjust size according to your model's requirements
+        img_array = np.array(img)
+        img_array = img_array / 255.0  # Normalize pixel values
+        img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
+        return img_array
+    except Exception as e:
+        print(f"Error preprocessing image: {e}")
+        return None
+
+def save_prediction(filename, result, confidence):
+    """Save prediction to database"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('INSERT INTO predictions (filename, result, confidence) VALUES (?, ?, ?)',
+              (filename, result, confidence))
+    conn.commit()
+    conn.close()
+
+@app.route('/')
+def index():
+    """Render the upload page"""
+    return render_template('index.html')
+
+@app.route('/about')
+def about():
+    """Render the about page"""
+    return render_template('about.html')
+
+@app.route('/history')
+def history():
+    """Render the prediction history page"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT * FROM predictions ORDER BY timestamp DESC LIMIT 50')
+    predictions = c.fetchall()
+    conn.close()
+    return render_template('history.html', predictions=predictions)
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    """Handle image upload and make prediction"""
+    if 'file' not in request.files:
+        flash('No file uploaded', 'error')
+        return redirect(url_for('index'))
+    
+    file = request.files['file']
+    if file.filename == '':
+        flash('No file selected', 'error')
+        return redirect(url_for('index'))
+
+    if not allowed_file(file.filename):
+        flash('Invalid file type. Please upload a PNG or JPEG image.', 'error')
+        return redirect(url_for('index'))
+
+    try:
+        # Save the uploaded file
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+
+        # Preprocess the image
+        processed_image = preprocess_image(filepath)
+        if processed_image is None:
+            flash('Error processing image', 'error')
+            return redirect(url_for('index'))
+
+        # Make prediction
+        if model is not None:
+            predictions = model.predict(processed_image)
+            predicted_class = np.argmax(predictions[0])
+            confidence = float(predictions[0][predicted_class])
+            result = CLASS_MAPPING.get(predicted_class, "Unknown")
+            
+            # Save prediction to database
+            save_prediction(filename, result, confidence)
+        else:
+            result = "Model not loaded"
+            flash('Model not loaded', 'error')
+
+        # Clean up - remove uploaded file
+        os.remove(filepath)
+
+        return render_template('index.html', result=result, confidence=confidence)
+
+    except Exception as e:
+        flash(f'Error processing request: {str(e)}', 'error')
+        return redirect(url_for('index'))
+
+@app.before_first_request
+def setup():
+    """Initialize the database before first request"""
+    init_db()
+
+if _name_ == '_main_':
+    app.run(debug=True)
+
+
+
+frontend code
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Implant Integration</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 50px;
+        }
+        .container {
+            max-width: 600px;
+            margin: auto;
+            padding: 20px;
+            border: 2px solid #007BFF;
+            border-radius: 10px;
+            box-shadow: 2px 2px 12px rgba(0, 0, 0, 0.2);
+        }
+        h1 {
+            color: #007BFF;
+        }
+        input[type="file"] {
+            margin: 15px 0;
+        }
+        button {
+            background-color: #007BFF;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #result {
+            margin-top: 20px;
+            font-size: 18px;
+            font-weight: bold;
+            color: #333;
+        }
+        .nav {
+            margin-bottom: 20px;
+        }
+        .nav a {
+            margin: 0 15px;
+            text-decoration: none;
+            color: #007BFF;
+            font-weight: bold;
+        }
+        .nav a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <a href="/">Home</a>
+        <a href="/about">About</a>
+        <a href="/history">History</a>
+    </div>
+    <div class="container">
+        <h1>Smart Implant Integration</h1>
+        <form id="upload-form" enctype="multipart/form-data">
+            <input type="file" id="imageUpload" accept="image/*" required>
+            <button type="button" onclick="uploadImage()">Upload & Analyze</button>
+        </form>
+        <div id="result"></div>
+    </div>
+
+    <script>
+        function uploadImage() {
+            const fileInput = document.getElementById('imageUpload');
+            if (fileInput.files.length === 0) {
+                alert('Please select an image.');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            
+            fetch('/predict', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('result').innerText = Result: ${data.label} (Confidence: ${data.confidence.toFixed(2)});
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                document.getElementById('result').innerText = 'Error analyzing image';
+            });
+        }
+    </script>
+</body>
+</html>
